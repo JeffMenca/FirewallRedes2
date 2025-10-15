@@ -53,17 +53,29 @@ apply_ingress_line() {
 process_ingress_file() {
   local mode="$1"
   [[ -f "$INGRESS_FILE" ]] || { echo "(No existe ${INGRESS_FILE}, omitiendo ingress)"; return; }
+
   while IFS= read -r raw; do
-    # ignora comentarios y líneas vacías
-    [[ -z "$(echo "$raw" | sed 's/#.*//')" ]] && continue
-    IFS=',' read -r f1 f2 f3 f4 <<< "$raw"
-    local src dst ports proto
-    src="$(trim "$f1")"; dst="$(trim "$f2")"; ports="$(trim "$f3")"; proto="$(trim "$f4")"
-    [[ -z "$src" || -z "$dst" || -z "$ports" ]] && continue
+    local line
+    line="$(echo "$raw" | sed 's/#.*//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [[ -z "$line" ]] && continue
+
+    if ! echo "$line" | grep -Eq '^[^,]+,[[:space:]]*[^,]+,[[:space:]]*\[[0-9,[:space:]]+\],[[:space:]]*(TCP|UDP|tcp|udp)[[:space:]]*$'; then
+      echo "⚠️  Formato inválido en ingress.rules: $line"
+      continue
+    fi
+
+    local parsed
+    parsed="$(echo "$line" | sed -E 's/^[[:space:]]*([^,]+),[[:space:]]*([^,]+),[[:space:]]*(\[[^]]+\]),[[:space:]]*([A-Za-z]+)[[:space:]]*$/\1|\2|\3|\4/')"
+
+    IFS='|' read -r src dst ports proto <<< "$parsed"
+
+    src="$(trim "$src")"; dst="$(trim "$dst")"; ports="$(trim "$ports")"; proto="$(trim "$proto")"
+
     apply_ingress_line "$mode" "$src" "$dst" "$ports" "$proto"
     echo "ingress: $mode $src -> $dst $ports/$proto"
   done < "$INGRESS_FILE"
 }
+
 
 # --- Inicialización base ---
 initialize_firewall() {
