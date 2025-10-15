@@ -1,0 +1,17 @@
+# Formato:
+# origen, destino, [puerto1,puerto2,...], protocolo
+
+# Permitir HTTP y HTTPS hacia el servidor web
+0.0.0.0, 192.168.1.10, [80,443], TCP
+
+# Permitir SSH desde la red local al servidor
+192.168.1.0/24, 192.168.1.10, [22], TCP
+
+# Permitir consultas DNS UDP desde cualquiera al DNS interno
+0.0.0.0, 192.168.1.53, [53], UDP
+
+# Permitir RDP (Windows) desde IP específica
+10.0.0.50, 192.168.1.20, [3389], TCP
+
+# Bloquear MySQL externo (si ejecutas con 'block')
+0.0.0.0, 192.168.1.15, [3306], TCP

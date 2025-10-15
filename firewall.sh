@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MAC_FILE="${SCRIPT_DIR}/acceso.mac"
 IP_FILE="${SCRIPT_DIR}/acceso.ip"
+INGRESS_FILE="${SCRIPT_DIR}/ingress.rules"
 
 SSH_PORT=22
 
@@ -25,6 +26,45 @@ is_ip_or_cidr() {
   [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/([0-9]|[1-2][0-9]|3[0-2]))?$ ]]
 }
 
+trim() { echo "$1" | sed 's/^\s*//;s/\s*$//'; }
+
+apply_ingress_line() {
+  local mode="$1" src="$2" dst="$3" ports_str="$4" proto="$5"
+  proto="$(echo "$proto" | tr '[:upper:]' '[:lower:]')"
+  ports_str="$(echo "$ports_str" | tr -d '[] ')"        
+  [[ -z "$proto" ]] && proto="tcp"
+
+  local src_match=()
+  [[ "$src" != "0.0.0.0" ]] && src_match=(-s "$src")
+
+  IFS=',' read -ra PORTS <<< "$ports_str"
+  for p in "${PORTS[@]}"; do
+    [[ -z "$p" ]] && continue
+    if [[ "$mode" == "allow" ]]; then
+      iptables -A INPUT   -p "$proto" "${src_match[@]}" -d "$dst" --dport "$p" -j ACCEPT
+      iptables -A FORWARD -p "$proto" "${src_match[@]}" -d "$dst" --dport "$p" -j ACCEPT
+    else
+      iptables -A INPUT   -p "$proto" "${src_match[@]}" -d "$dst" --dport "$p" -j DROP
+      iptables -A FORWARD -p "$proto" "${src_match[@]}" -d "$dst" --dport "$p" -j DROP
+    fi
+  done
+}
+
+process_ingress_file() {
+  local mode="$1"
+  [[ -f "$INGRESS_FILE" ]] || { echo "(No existe ${INGRESS_FILE}, omitiendo ingress)"; return; }
+  while IFS= read -r raw; do
+    # ignora comentarios y líneas vacías
+    [[ -z "$(echo "$raw" | sed 's/#.*//')" ]] && continue
+    IFS=',' read -r f1 f2 f3 f4 <<< "$raw"
+    local src dst ports proto
+    src="$(trim "$f1")"; dst="$(trim "$f2")"; ports="$(trim "$f3")"; proto="$(trim "$f4")"
+    [[ -z "$src" || -z "$dst" || -z "$ports" ]] && continue
+    apply_ingress_line "$mode" "$src" "$dst" "$ports" "$proto"
+    echo "ingress: $mode $src -> $dst $ports/$proto"
+  done < "$INGRESS_FILE"
+}
+
 # --- Inicialización base ---
 initialize_firewall() {
   iptables -F
@@ -35,20 +75,31 @@ initialize_firewall() {
   iptables -t nat -X
   iptables -t mangle -X
 
+  # Políticas provisionales abiertas mientras cargamos reglas
   iptables -P INPUT ACCEPT
   iptables -P FORWARD ACCEPT
   iptables -P OUTPUT ACCEPT
 
-  # Mantener SSH accesible
-  iptables -A INPUT -p tcp --dport ${SSH_PORT} -j ACCEPT
+  # 1) Loopback siempre permitido
+  iptables -A INPUT -i lo -j ACCEPT
+
+  # 2) Tráfico de retorno
+  iptables -A INPUT   -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+  # 3) SSH seguro
+  iptables -A INPUT  -p tcp --dport ${SSH_PORT} -j ACCEPT
   iptables -A FORWARD -p tcp --dport ${SSH_PORT} -j ACCEPT
 
-  # Política por defecto: todo cerrado en INPUT/FORWARD
+  # 4) Ahora sí: políticas por defecto restrictivas
   iptables -P INPUT DROP
   iptables -P FORWARD DROP
+  # OUTPUT lo dejamos en ACCEPT para no romper salidas
+  iptables -P OUTPUT ACCEPT
 
-  echo "Base de firewall aplicada (SSH:${SSH_PORT} permitido, INPUT/FORWARD en DROP)."
+  echo "Base de firewall aplicada (lo/ESTABLISHED/SSH permitidos; INPUT/FORWARD en DROP)."
 }
+
 
 # --- Reglas por MAC ---
 allow_mac() {
@@ -123,6 +174,7 @@ allow_from_files() {
   else
     echo "(No existe ${IP_FILE}, omitiendo IPs)"
   fi
+  process_ingress_file "allow"
 }
 
 block_from_files() {
@@ -147,6 +199,7 @@ block_from_files() {
   else
     echo "(No existe ${IP_FILE}, omitiendo IPs)"
   fi
+  process_ingress_file "block"
 }
 
 persist_rules() {
